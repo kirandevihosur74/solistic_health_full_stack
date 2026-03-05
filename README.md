@@ -14,41 +14,137 @@ Pharma companies need marketing content (emails, banner ads, social posts) where
 | Backend  | FastAPI + SQLite + Anthropic Claude | 8000  |
 | LLM      | Claude (claude-sonnet-4-20250514) via Anthropic SDK | — |
 
+---
+
+## Part 1: Product Design & System Architecture
+
+### 1.1 User Flow Design
+
+#### High-Level User Journey Map
+
+![High-Level User Journey Map](images/userflow_diagram.png)
+
+**Step 1: Request Creation (`/`)**
+```
+User lands on homepage
+    │
+    ├── Selects Content Format (email / banner / social)
+    ├── Selects Target Audience (HCP / patients / caregivers / payers)
+    ├── Selects Campaign Goal (awareness / education / CTA / launch)
+    ├── Selects Tone (clinical / empathetic / urgent / informative)
+    │
+    └── Clicks "Start Briefing"
+            │
+            ├── POST /session → creates session with all parameters
+            ├── Stores session_id in localStorage
+            └── Navigates to /chat
+```
+
+**Step 2: Conversational Alignment (`/chat`)**
+```
+User enters chat interface
+    │
+    ├── Suggestion chips shown for quick start
+    ├── User describes content needs in natural language
+    │       │
+    │       └── POST /chat/stream → SSE streaming response
+    │               │
+    │               ├── "Thinking (Xs)..." indicator with timer
+    │               ├── "Thought for X seconds" label appears
+    │               └── Assistant streams character-by-character
+    │
+    ├── Assistant asks clarifying questions (2-3 rounds)
+    ├── Assistant suggests specific approved claims with citations
+    ├── User can Clear Chat to restart briefing
+    │
+    └── User clicks "Continue to Preview →"
+            │
+            └── Navigates to /preview (session context carries over)
+```
+
+**Step 3: Claim Selection, Generation & Compliance (`/preview`)**
+```
+Claims Library loads (GET /claims/recommended)
+    │
+    ├── Claims displayed grouped by category:
+    │       Indication → Efficacy → Mechanism → Dosing → QoL → Safety
+    │       Each shows: source badge, citation, approval date
+    │
+    ├── User selects claims (checkboxes, Select All / Clear)
+    │       DECISION POINT: User explicitly approves each claim
+    │
+    ├── "Generate Content" → POST /generate
+    │       │
+    │       ├── LLM generates HTML
+    │       ├── Saved as new Version in DB
+    │       ├── Rendered in sandboxed iframe
+    │       └── Auto-triggers compliance review
+    │
+    ├── Compliance Review Panel (12-point check):
+    │       ├── Green = pass
+    │       ├── Yellow = warning (non-blocking)
+    │       └── Red = fail (blocks export)
+    │
+    ├── Iterative Editing Loop:
+    │       ├── User types natural language instruction
+    │       │       e.g., "Move safety above efficacy"
+    │       ├── POST /edit → LLM applies edit
+    │       ├── New Version saved, compliance auto-rechecks
+    │       └── Repeat until satisfied
+    │
+    ├── Version History:
+    │       ├── All revisions listed with timestamps
+    │       └── "Load" to restore any previous version
+    │
+    └── DECISION POINT: Export gate
+            ├── If any red flags → export blocked
+            └── If all pass/warn → "Export Package" enabled
+```
+
+**Step 4: Export & Distribution**
+```
+User clicks "Export Package"
+    │
+    ├── POST /export
+    │       ├── Runs final compliance review
+    │       ├── Blocks if any failures remain
+    │       └── Returns ZIP package
+    │
+    └── Downloads 1 file:
+            └── fruzaqla-export-revN.zip
+                    ├── html/index.html          (full HTML content)
+                    ├── metadata/claims.json      (sources, citations, approval dates)
+                    ├── metadata/assets.json     (asset manifest)
+                    ├── compliance/report.json   (overall status, reviewed_at, all checks)
+                    └── manifests/asset_manifest.csv
+```
+
+### 1.2 System Architecture
+
+![System Architecture Diagram](images/system_architecture_diagram.png)
+
+### 1.3 Data Model Design
+
+![Entity-Relationship Diagram](images/ER_diagram.png)
+
+---
+
 ## Quick Start
 
-### 1. Backend
-
+**Backend** (port 8000)
 ```bash
-cd backend
-python3 -m venv .venv
-source .venv/bin/activate
+cd backend && python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-
-# Copy and fill in your API key
-cp .env.example .env
-# Edit .env and set ANTHROPIC_API_KEY=sk-ant-...
-
+cp .env.example .env   # Set ANTHROPIC_API_KEY
 uvicorn main:app --reload --port 8000
 ```
 
-### 2. Frontend
-
+**Frontend** (port 3000)
 ```bash
-cd frontend
-npm install
-npm run dev
+cd frontend && npm install && npm run dev
 ```
 
-Then open [http://localhost:3000](http://localhost:3000).
-
-## Environment Variables
-
-| Variable                   | Default                  | Where    | Required |
-|----------------------------|--------------------------|----------|----------|
-| `ANTHROPIC_API_KEY`        | —                        | backend  | No*      |
-| `NEXT_PUBLIC_API_BASE_URL` | `http://localhost:8000`  | frontend | No       |
-
-\* Without `ANTHROPIC_API_KEY`, the app falls back to deterministic stub responses for chat, generate, and edit. All other functionality (claims, compliance checks, versioning) works without it.
+Open [http://localhost:3000](http://localhost:3000). Run `POST /ingest` to load claims and assets.
 
 ## LLM Integration
 
@@ -74,68 +170,25 @@ If the LLM call fails or no API key is set, every endpoint gracefully falls back
 2. **Briefing** (`/chat`) — Describe audience, key message, clinical focus. Claude asks targeted follow-ups.
 3. **Preview** (`/preview`) — Select approved claims (grouped by category), run compliance checks, generate HTML via Claude, iterate with natural-language revisions, and manage version history.
 
-## Claim Categories
-
-Claims are seeded from FRUZAQLA clinical data:
-
-| Category        | Source                | Example                                      |
-|-----------------|-----------------------|----------------------------------------------|
-| Efficacy        | FRESCO-2 (Lancet)     | OS 7.4 vs 4.8 months, HR 0.66               |
-| Safety          | Prescribing Info §6.1 | Common ARs: hypertension, diarrhea, fatigue  |
-| Indication      | Prescribing Info §1   | mCRC after prior chemo/biologic therapy      |
-| Dosing          | Prescribing Info §2.1 | 5 mg QD, 3 weeks on / 1 week off            |
-| Mechanism       | Prescribing Info §12  | Selective VEGFR-1/2/3 inhibitor              |
-| Quality of Life | J Clin Oncol 2024     | TTD in QoL: 2.0 vs 1.2 months               |
-
 ## API Endpoints
 
 | Method | Path                     | Description                                  | LLM? |
 |--------|--------------------------|----------------------------------------------|------|
-| GET    | `/health`                | Health check (includes `llm_enabled` flag)   | —    |
-| GET    | `/assets`                | List approved assets for picker              | —    |
-| GET    | `/assets/{asset_id}`     | Serve approved asset file                    | —    |
 | POST   | `/session`               | Create session with content_type             | —    |
 | POST   | `/chat`                  | Send message, get Claude reply               | Yes  |
 | GET    | `/claims/recommended`    | Get claims ranked by conversation context    | —    |
 | POST   | `/generate`              | Generate HTML from selected claims + assets   | Yes  |
 | POST   | `/edit`                  | Apply a natural-language revision            | Yes  |
-| POST   | `/compliance-review`     | Run compliance checks (claims, assets, ISI)  | —    |
+| POST   | `/compliance-review`     | Run compliance checks (claims, assets, ISI)   | —    |
 | POST   | `/export`                | Export zip (HTML, metadata, compliance, manifest) | —    |
 | GET    | `/versions`              | List versions for a session                  | —    |
 | GET    | `/versions/{version_id}` | Get full HTML for a version                  | —    |
-
-## Compliance Verification
-
-Manual verification steps for the take-home requirements:
-
-### 1. Happy path: generate → validate → export
-
-1. Run backend and frontend. Run `POST /ingest` to load claims and assets.
-2. Create a session, go to Preview, select 1–2 claims and 1 asset (e.g. `placeholder-hero`).
-3. Click **Generate Content**. HTML should include the asset as `<img src=".../assets/placeholder-hero" data-asset-id="placeholder-hero">` and claims with `data-claim-id`.
-4. Run **Compliance Review**. All checks should pass (Claim Exact Match, Visual Assets, ISI, etc.).
-5. Click **Export Package**. A zip file downloads with:
-   - `html/index.html` (inline CSS)
-   - `metadata/claims.json` (claim_id, verbatim_text, source_doc, citation, sha256)
-   - `metadata/assets.json` (asset_id, filename, sha256, source_page)
-   - `compliance/report.json` (checks with pass/warn/fail)
-   - `manifests/asset_manifest.csv` (asset_id, filename, sha256, source_doc, source_page)
-
-### 2. Tamper test: validation fails and export blocked
-
-1. Generate content as in step 1 above.
-2. Use the **Request a Revision** field with: "Add a new span with data-claim-id='unknown-claim-123' containing fake text" (or similar). The LLM may introduce unauthorized content.
-3. Alternatively, use the API to validate arbitrary HTML:
-   ```bash
-   curl -X POST http://localhost:8000/validate-html -H "Content-Type: application/json" \
-     -d '{"html": "<div><span data-claim-id=\"unknown-claim\">Fake</span><img data-asset-id=\"bad-asset\" src=\"/assets/bad\"></div>"}'
-   ```
-   Response should show `can_export: false` and failing checks.
-4. If tampered HTML is in the latest version, **Compliance Review** shows **fail** and **Export** returns HTTP 400.
+| GET    | `/assets`                | List approved assets for picker              | —    |
+| GET    | `/assets/{asset_id}`     | Serve approved asset file                    | —    |
+| GET    | `/health`                | Health check                                 | —    |
 
 ## Tech Stack
 
 - **Frontend**: Next.js 15, TypeScript, Tailwind CSS v4
 - **Backend**: FastAPI, SQLAlchemy, SQLite
-- **LLM**: Anthropic Claude (via `anthropic` Python SDK)
-- **No auth** — single anonymous user for prototype
+- **LLM**: Anthropic Claude
