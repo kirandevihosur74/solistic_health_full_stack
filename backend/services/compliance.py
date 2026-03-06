@@ -104,6 +104,85 @@ def validate_assets(html_asset_ids: list[str], approved_ids: set[str]) -> Review
     )
 
 
+def _extract_non_claim_text(html: str) -> str:
+    """Extract plain text from HTML excluding content inside data-claim-id elements."""
+    if not html:
+        return ""
+    # Replace claim blocks with placeholder so we only analyze non-claim text
+    masked = re.sub(
+        r'<\w+[^>]*\sdata-claim-id=["\'][^"\']+["\'][^>]*>[\s\S]*?</\w+>',
+        " ",
+        html,
+    )
+    masked = re.sub(
+        r'<span[^>]*data-claim-id=["\'][^"\']+["\'][^>]*>[^<]*</span>',
+        " ",
+        masked,
+    )
+    # Strip all remaining HTML tags
+    text = re.sub(r"<[^>]+>", " ", masked)
+    text = html_mod.unescape(text).replace("&nbsp;", " ").replace("\xa0", " ")
+    return " ".join(text.split())
+
+
+# Patterns that indicate clinical data (statistics, trial names) — must be inside claim elements
+_CLINICAL_PATTERNS = [
+    (r"\d+\.\d+\s*%", "decimal percentage (e.g. 55.5%)"),
+    (r"\d+\.?\d*\s*(?:months|weeks)\b", "numeric duration (e.g. 7.4 months)"),
+    (r"\bHR\s*[0-9.]+", "hazard ratio (e.g. HR 0.66)"),
+    (r"\bP\s*[<>=]\s*[0-9.]+", "P-value (e.g. P<0.001)"),
+    (r"\bFRESCO\b", "trial name (FRESCO)"),
+    (r"\bmedian\s+(?:OS|PFS)\b", "median OS/PFS"),
+    (r"\bDCR\s*\d+", "DCR with number"),
+]
+
+# Boilerplate phrases that may contain numbers — exclude from flagging
+_WHITELIST_PHRASES = (
+    "2025",
+    "100%",
+    "US-FRZ",
+    "03/2025",
+    "728",
+    "90",
+)
+
+
+def validate_no_invented_clinical(html: str) -> ReviewItem:
+    """
+    Fail if non-claim text contains clinical data patterns (statistics, trial names).
+    Only text outside data-claim-id elements is scanned.
+    """
+    if not html:
+        return ReviewItem(
+            check="No Invented Clinical Data",
+            status="pass",
+            detail="No content to scan.",
+        )
+    if not re.search(r"data-claim-id", html):
+        return ReviewItem(
+            check="No Invented Clinical Data",
+            status="pass",
+            detail="No claim elements present; check skipped.",
+        )
+    text = _extract_non_claim_text(html)
+    for phrase in _WHITELIST_PHRASES:
+        text = text.replace(phrase, " ")
+    for pattern, desc in _CLINICAL_PATTERNS:
+        for m in re.finditer(pattern, text, re.IGNORECASE):
+            snippet = m.group(0)
+            return ReviewItem(
+                check="No Invented Clinical Data",
+                status="fail",
+                detail=f"Clinical data outside approved claims: '{snippet}' ({desc}). "
+                "All clinical statements must use {{CLAIM:id}} placeholders from the approved library.",
+            )
+    return ReviewItem(
+        check="No Invented Clinical Data",
+        status="pass",
+        detail="No invented clinical data detected. All clinical content appears in approved claim elements.",
+    )
+
+
 def validate_img_sources(html: str) -> ReviewItem | None:
     """Fail if any img has external src (http/https/data:) or lacks data-asset-id."""
     if not html:

@@ -10,6 +10,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from sqlalchemy import func
 from sqlalchemy.orm import Session as DBSession
 
 from database import get_db, Session, Message, Claim, Version, ApprovedAsset, new_uuid, utcnow
@@ -22,6 +23,7 @@ from services import (
     validate_claims_exact,
     validate_assets,
     validate_img_sources,
+    validate_no_invented_clinical,
     inject_claims_and_assets,
     sanitize_edit_html,
 )
@@ -69,6 +71,9 @@ def _run_compliance_review(body: GenerateReq, db: DBSession) -> ComplianceReview
 
     claim_check = validate_claims_exact(html_claim_ids, html_claim_texts, approved_claim_map)
     items.append(claim_check)
+
+    invented_check = validate_no_invented_clinical(html_content)
+    items.append(invented_check)
 
     asset_check = validate_assets(html_asset_ids, approved_asset_ids)
     items.append(asset_check)
@@ -243,10 +248,12 @@ def generate(body: GenerateReq, db: DBSession = Depends(get_db)):
     claim_categories = [c.category for c in claims]
     logger.info("[generate] Matched %d claims: categories=%s", len(claims), claim_categories)
 
-    prev_count = (
-        db.query(Version).filter(Version.session_id == body.session_id).count()
-    )
-    revision = prev_count + 1
+    max_rev = (
+        db.query(func.max(Version.revision_number))
+        .filter(Version.session_id == body.session_id)
+        .scalar()
+    ) or 0
+    revision = max_rev + 1
     logger.info("[generate] This will be revision #%d", revision)
 
     messages = (
@@ -338,10 +345,12 @@ def edit(body: EditReq, db: DBSession = Depends(get_db)):
         edited_html = sanitize_edit_html(edited_html, claims_for_edit, asset_ids_used)
         logger.info("[edit] Sanitized: re-rendered %d claims, %d assets", len(claims_for_edit), len(asset_ids_used))
 
-    prev_count = (
-        db.query(Version).filter(Version.session_id == body.session_id).count()
-    )
-    revision = prev_count + 1
+    max_rev = (
+        db.query(func.max(Version.revision_number))
+        .filter(Version.session_id == body.session_id)
+        .scalar()
+    ) or 0
+    revision = max_rev + 1
 
     claim_ids_json = latest.claim_ids_used if latest else "[]"
     asset_ids_json = latest.asset_ids_used if latest else "[]"
@@ -404,6 +413,8 @@ def validate_html(body: ValidateHtmlReq, db: DBSession = Depends(get_db)):
     checks = []
     claim_check = validate_claims_exact(html_claim_ids, html_claim_texts, approved_claim_map)
     checks.append({"id": "claim_exact_match", "label": claim_check.check, "status": claim_check.status, "details": claim_check.detail})
+    invented_check = validate_no_invented_clinical(body.html)
+    checks.append({"id": "no_invented_clinical", "label": invented_check.check, "status": invented_check.status, "details": invented_check.detail})
     asset_check = validate_assets(html_asset_ids, approved_asset_ids)
     checks.append({"id": "visual_assets", "label": asset_check.check, "status": asset_check.status, "details": asset_check.detail})
     img_check = validate_img_sources(body.html)

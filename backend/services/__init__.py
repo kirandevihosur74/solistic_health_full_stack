@@ -5,6 +5,7 @@ from services.compliance import (
     validate_claims_exact,
     validate_assets,
     validate_img_sources,
+    validate_no_invented_clinical,
 )
 from services.html_builder import (
     inject_claims_and_assets,
@@ -18,6 +19,7 @@ __all__ = [
     "validate_claims_exact",
     "validate_assets",
     "validate_img_sources",
+    "validate_no_invented_clinical",
     "inject_claims_and_assets",
     "sanitize_edit_html",
     "build_html",
